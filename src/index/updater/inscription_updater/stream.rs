@@ -385,10 +385,8 @@ impl StreamEvent {
 
     // when old_owner exists, only publish "transfer" inscriptions once.
     if let Some(brc20) = &self.brc20 {
-      if self.old_owner.is_some() {
-        if brc20.op != "transfer" || transfer_count > 0 {
-          return Ok(());
-        }
+      if self.old_owner.is_some() && (brc20.op != "transfer" || transfer_count > 0) {
+        return Ok(());
       }
     }
 
