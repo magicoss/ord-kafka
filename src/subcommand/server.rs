@@ -56,7 +56,6 @@ mod middleware;
 pub(crate) mod query;
 mod rpc;
 
-
 enum SpawnConfig {
   Https(AxumAcceptor),
   Http,
