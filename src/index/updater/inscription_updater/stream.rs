@@ -328,7 +328,7 @@ impl StreamEvent {
       });
 
     // Temporarily revert it due to enrichment performance issue.
-    // TODO: track brc-20 inscription into a new REDB table, and stop populating their stream events.
+    // Track brc-20 inscription into a new REDB table, and stop populating their stream events.
     if *IS_BRC20 {
       match index
         .get_inscription_by_id_unsafe(self.inscription_id)
