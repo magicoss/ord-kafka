@@ -400,6 +400,7 @@ impl Updater<'_> {
     let mut sequence_number_to_satpoint = wtx.open_table(SEQUENCE_NUMBER_TO_SATPOINT)?;
     let mut statistic_to_count = wtx.open_table(STATISTIC_TO_COUNT)?;
     let mut transaction_id_to_transaction = wtx.open_table(TRANSACTION_ID_TO_TRANSACTION)?;
+    let mut inscription_id_to_metaprotocol = wtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL)?;
 
     let mut lost_sats = statistic_to_count
       .get(&Statistic::LostSats.key())?
@@ -442,6 +443,7 @@ impl Updater<'_> {
       home_inscriptions: &mut home_inscriptions,
       id_to_sequence_number: &mut inscription_id_to_sequence_number,
       index_transactions: self.index.index_transactions,
+      inscription_id_to_metaprotocol: &mut inscription_id_to_metaprotocol,
       inscription_number_to_sequence_number: &mut inscription_number_to_sequence_number,
       lost_sats,
       next_sequence_number,
@@ -475,6 +477,7 @@ impl Updater<'_> {
       }
       let mut tx_block_index = 0;
       for (tx_offset, (tx, txid)) in block.txdata.iter().enumerate().skip(1) {
+        let tx_start = Instant::now();
         log::trace!("Indexing transaction {tx_offset}…");
 
         let mut input_sat_ranges = VecDeque::new();
@@ -519,11 +522,20 @@ impl Updater<'_> {
           self.index,
         )?;
 
+        let tx_duration = tx_start.elapsed();
+        log::info!(
+          "Transaction {} (txid: {}) processed in {:?}",
+          tx_offset,
+          txid,
+          tx_duration
+        );
+
         tx_block_index += 1;
         coinbase_inputs.extend(input_sat_ranges);
       }
 
       if let Some((tx, txid)) = block.txdata.first() {
+        let tx_start = Instant::now();
         self.index_transaction_sats(
           tx,
           *txid,
@@ -536,6 +548,12 @@ impl Updater<'_> {
           index_inscriptions,
           self.index,
         )?;
+        let tx_duration = tx_start.elapsed();
+        log::info!(
+          "Coinbase transaction (txid: {}) processed in {:?}",
+          txid,
+          tx_duration
+        );
       }
 
       if !coinbase_inputs.is_empty() {
@@ -571,7 +589,15 @@ impl Updater<'_> {
         .chain(block.txdata.first())
         .enumerate()
       {
+        let tx_start = Instant::now();
         inscription_updater.index_inscriptions(tx, *txid, tx_block_index, None, self.index)?;
+        let tx_duration = tx_start.elapsed();
+        log::info!(
+          "Transaction {} (txid: {}) processed in {:?}",
+          tx_block_index,
+          txid,
+          tx_duration
+        );
       }
     }
 

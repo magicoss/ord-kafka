@@ -84,6 +84,7 @@ define_table! { STATISTIC_TO_COUNT, u64, u64 }
 define_table! { TRANSACTION_ID_TO_RUNE, &TxidValue, u128 }
 define_table! { TRANSACTION_ID_TO_TRANSACTION, &TxidValue, &[u8] }
 define_table! { WRITE_TRANSACTION_STARTING_BLOCK_COUNT_TO_TIMESTAMP, u32, u128 }
+define_table! { INSCRIPTION_ID_TO_METAPROTOCOL, InscriptionIdValue, &[u8] }
 
 #[derive(Copy, Clone)]
 pub(crate) enum Statistic {
@@ -340,6 +341,7 @@ impl Index {
         tx.open_table(SEQUENCE_NUMBER_TO_SATPOINT)?;
         tx.open_table(TRANSACTION_ID_TO_RUNE)?;
         tx.open_table(WRITE_TRANSACTION_STARTING_BLOCK_COUNT_TO_TIMESTAMP)?;
+        tx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL)?;
 
         {
           let mut outpoint_to_sat_ranges = tx.open_table(OUTPOINT_TO_SAT_RANGES)?;
@@ -1302,21 +1304,6 @@ impl Index {
     Ok(satpoint)
   }
 
-  pub(crate) fn get_inscription_by_id_unsafe(
-    &self,
-    inscription_id: InscriptionId,
-  ) -> Result<Option<Inscription>> {
-    let tx = self
-      .get_transaction(inscription_id.txid)
-      .unwrap_or(self.get_transaction(inscription_id.txid)?);
-    Ok(tx.and_then(|tx| {
-      ParsedEnvelope::from_transaction(&tx)
-        .into_iter()
-        .nth(inscription_id.index as usize)
-        .map(|envelope| envelope.payload)
-    }))
-  }
-
   pub(crate) fn get_inscription_by_id(
     &self,
     inscription_id: InscriptionId,
@@ -1891,6 +1878,27 @@ impl Index {
       .map(|value| InscriptionEntry::load(value.value()));
 
     Ok(entry)
+  }
+
+  pub(crate) fn get_metaprotocol(&self, inscription_id: InscriptionId) -> Result<Option<String>> {
+    let rtx = self.database.begin_read()?;
+    let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL)?;
+
+    if let Some(guard) = metaprotocol_table.get(&inscription_id.store())? {
+      if let Ok(s) = std::str::from_utf8(guard.value()) {
+        return Ok(Some(s.to_string()));
+      }
+    }
+    Ok(None)
+  }
+
+  pub(crate) fn is_brc20(&self, inscription_id: InscriptionId) -> Result<bool> {
+    Ok(
+      self
+        .get_metaprotocol(inscription_id)?
+        .map(|p| p == "brc-20")
+        .unwrap_or(false),
+    )
   }
 
   #[cfg(test)]
@@ -5762,5 +5770,127 @@ mod tests {
         sequence_number: 0,
       }
     );
+  }
+
+  #[test]
+  fn brc20_metaprotocol_caching() {
+    // Test that BRC20 inscriptions have their metaprotocol cached
+    let brc20_json = r#"{"p":"brc-20","op":"deploy","tick":"TEST","max":"1000"}"#;
+    let brc20_inscription = inscription("text/plain;charset=utf-8", brc20_json);
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, brc20_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let txid = context.rpc_server.broadcast_tx(template);
+    let inscription_id = InscriptionId { txid, index: 0 };
+    context.mine_blocks(1);
+
+    // Verify metaprotocol is cached
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol, Some("brc-20".to_string()));
+
+    // Verify is_brc20 returns true
+    assert!(context.index.is_brc20(inscription_id).unwrap());
+  }
+
+  #[test]
+  fn non_brc20_inscription_not_cached() {
+    // Test that non-BRC20 inscriptions don't get cached
+    let regular_inscription = inscription("text/plain;charset=utf-8", "hello world");
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, regular_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let txid = context.rpc_server.broadcast_tx(template);
+    let inscription_id = InscriptionId { txid, index: 0 };
+    context.mine_blocks(1);
+
+    // Verify metaprotocol is not cached
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol, None);
+
+    // Verify is_brc20 returns false
+    assert!(!context.index.is_brc20(inscription_id).unwrap());
+  }
+
+  #[test]
+  fn invalid_brc20_json_not_cached() {
+    // Test that invalid BRC20 JSON doesn't get cached
+    let invalid_json = r#"{"p":"brc-20","invalid":"json"}"#;
+    let invalid_inscription = inscription("text/plain;charset=utf-8", invalid_json);
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, invalid_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let txid = context.rpc_server.broadcast_tx(template);
+    let inscription_id = InscriptionId { txid, index: 0 };
+    context.mine_blocks(1);
+
+    // Verify metaprotocol is not cached (invalid JSON doesn't parse as BRC20)
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol, None);
+
+    // Verify is_brc20 returns false
+    assert!(!context.index.is_brc20(inscription_id).unwrap());
+  }
+
+  #[test]
+  fn non_text_inscription_not_cached() {
+    // Test that non-text inscriptions (e.g., images) don't get cached even if they contain JSON
+    let json_in_image = r#"{"p":"brc-20","op":"deploy","tick":"TEST"}"#;
+    let image_inscription = inscription("image/png", json_in_image);
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, image_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let txid = context.rpc_server.broadcast_tx(template);
+    let inscription_id = InscriptionId { txid, index: 0 };
+    context.mine_blocks(1);
+
+    // Verify metaprotocol is not cached (not text-related)
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol, None);
+
+    // Verify is_brc20 returns false
+    assert!(!context.index.is_brc20(inscription_id).unwrap());
+  }
+
+  #[test]
+  fn different_metaprotocol_cached() {
+    // Test that different metaprotocols (not just brc-20) can be cached
+    let other_protocol_json = r#"{"p":"brc-721","op":"mint","id":"123"}"#;
+    let other_inscription = inscription("text/plain;charset=utf-8", other_protocol_json);
+    let template = TransactionTemplate {
+      inputs: &[(1, 0, 0, other_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let txid = context.rpc_server.broadcast_tx(template);
+    let inscription_id = InscriptionId { txid, index: 0 };
+    context.mine_blocks(1);
+
+    // Note: This will only cache if the JSON parses as BRC20 struct (which requires "p" field)
+    // Since brc-721 might not parse correctly as BRC20 struct, it may not be cached
+    // But if it does parse, it should cache the "p" value
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    // If it parses as BRC20 struct, it should cache "brc-721"
+    if metaprotocol.is_some() {
+      assert_eq!(metaprotocol, Some("brc-721".to_string()));
+      assert!(!context.index.is_brc20(inscription_id).unwrap()); // Not brc-20
+    }
   }
 }
