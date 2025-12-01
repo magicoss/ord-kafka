@@ -424,6 +424,45 @@ impl InscriptionUpdater<'_, '_, '_> {
     let inscription_id = flotsam.inscription_id;
     let (unbound, sequence_number) = match flotsam.origin {
       Origin::Old { old_satpoint } => {
+        // Check if metaprotocol is cached, if not, parse and cache it
+        let metaprotocol_cached = self
+          .inscription_id_to_metaprotocol
+          .get(&inscription_id.store())?
+          .is_some();
+        
+        if !metaprotocol_cached {
+          // Cache metaprotocol for existing inscriptions during transfer
+          if let Ok(Some(inscription)) = index.get_inscription_by_id(inscription_id) {
+            if let Some(body) = inscription.body() {
+              use crate::index::updater::inscription_updater::stream::StreamEvent;
+              let content_type = inscription.content_type().map(|ct| ct.to_string());
+              if StreamEvent::is_text_related(inscription.media(), content_type) {
+                if let Ok(brc20) = serde_json::from_slice::<stream::BRC20>(body) {
+                  // Store the protocol string (e.g., "brc-20")
+                  self
+                    .inscription_id_to_metaprotocol
+                    .insert(&inscription_id.store(), brc20.p.as_bytes())?;
+                } else {
+                  // Not a valid BRC20, store 'NA' to indicate we've checked
+                  self
+                    .inscription_id_to_metaprotocol
+                    .insert(&inscription_id.store(), b"NA".as_slice())?;
+                }
+              } else {
+                // Not text-related, store 'NA' to indicate we've checked
+                self
+                  .inscription_id_to_metaprotocol
+                  .insert(&inscription_id.store(), b"NA".as_slice())?;
+              }
+            } else {
+              // No body, store 'NA' to indicate we've checked
+              self
+                .inscription_id_to_metaprotocol
+                .insert(&inscription_id.store(), b"NA".as_slice())?;
+            }
+          }
+        }
+
         StreamEvent::new(
           tx,
           tx_block_index,
@@ -599,6 +638,7 @@ impl InscriptionUpdater<'_, '_, '_> {
 
         // Parse and store metaprotocol if inscription has one (e.g., BRC20)
         // Parse once and reuse to avoid parsing again in enrich_content
+        // Store 'NA' for non-BRC20 inscriptions to indicate we've checked
         let parsed_brc20 = if let Some(body) = inscription.body() {
           use crate::index::updater::inscription_updater::stream::StreamEvent;
           let content_type = inscription.content_type().map(|ct| ct.to_string());
@@ -610,12 +650,24 @@ impl InscriptionUpdater<'_, '_, '_> {
                 .insert(&inscription_id.store(), brc20.p.as_bytes())?;
               Some(brc20)
             } else {
+              // Not a valid BRC20, store 'NA' to indicate we've checked
+              self
+                .inscription_id_to_metaprotocol
+                .insert(&inscription_id.store(), b"NA".as_slice())?;
               None
             }
           } else {
+            // Not text-related, store 'NA' to indicate we've checked
+            self
+              .inscription_id_to_metaprotocol
+              .insert(&inscription_id.store(), b"NA".as_slice())?;
             None
           }
         } else {
+          // No body, store 'NA' to indicate we've checked
+          self
+            .inscription_id_to_metaprotocol
+            .insert(&inscription_id.store(), b"NA".as_slice())?;
           None
         };
 
