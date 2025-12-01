@@ -1886,6 +1886,10 @@ impl Index {
 
     if let Some(guard) = metaprotocol_table.get(&inscription_id.store())? {
       if let Ok(s) = std::str::from_utf8(guard.value()) {
+        // Return None for 'NA' to indicate no metaprotocol
+        if s == "NA" {
+          return Ok(None);
+        }
         return Ok(Some(s.to_string()));
       }
     }
@@ -5797,8 +5801,8 @@ mod tests {
   }
 
   #[test]
-  fn non_brc20_inscription_not_cached() {
-    // Test that non-BRC20 inscriptions don't get cached
+  fn non_brc20_inscription_cached_as_na() {
+    // Test that non-BRC20 inscriptions get cached as 'NA'
     let regular_inscription = inscription("text/plain;charset=utf-8", "hello world");
     let template = TransactionTemplate {
       inputs: &[(1, 0, 0, regular_inscription.to_witness())],
@@ -5811,17 +5815,24 @@ mod tests {
     let inscription_id = InscriptionId { txid, index: 0 };
     context.mine_blocks(1);
 
-    // Verify metaprotocol is not cached
+    // Verify metaprotocol is cached as 'NA' (but get_metaprotocol returns None for 'NA')
     let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
-    assert_eq!(metaprotocol, None);
+    assert_eq!(metaprotocol, None); // 'NA' is returned as None
 
     // Verify is_brc20 returns false
     assert!(!context.index.is_brc20(inscription_id).unwrap());
+
+    // Verify the cache entry exists by checking the raw table
+    let rtx = context.index.database.begin_read().unwrap();
+    let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL).unwrap();
+    let cached_value = metaprotocol_table.get(&inscription_id.store()).unwrap();
+    assert!(cached_value.is_some());
+    assert_eq!(cached_value.unwrap().value(), b"NA");
   }
 
   #[test]
-  fn invalid_brc20_json_not_cached() {
-    // Test that invalid BRC20 JSON doesn't get cached
+  fn invalid_brc20_json_cached_as_na() {
+    // Test that invalid BRC20 JSON gets cached as 'NA'
     let invalid_json = r#"{"p":"brc-20","invalid":"json"}"#;
     let invalid_inscription = inscription("text/plain;charset=utf-8", invalid_json);
     let template = TransactionTemplate {
@@ -5835,17 +5846,24 @@ mod tests {
     let inscription_id = InscriptionId { txid, index: 0 };
     context.mine_blocks(1);
 
-    // Verify metaprotocol is not cached (invalid JSON doesn't parse as BRC20)
+    // Verify metaprotocol is cached as 'NA' (invalid JSON doesn't parse as BRC20)
     let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
-    assert_eq!(metaprotocol, None);
+    assert_eq!(metaprotocol, None); // 'NA' is returned as None
 
     // Verify is_brc20 returns false
     assert!(!context.index.is_brc20(inscription_id).unwrap());
+
+    // Verify the cache entry exists
+    let rtx = context.index.database.begin_read().unwrap();
+    let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL).unwrap();
+    let cached_value = metaprotocol_table.get(&inscription_id.store()).unwrap();
+    assert!(cached_value.is_some());
+    assert_eq!(cached_value.unwrap().value(), b"NA");
   }
 
   #[test]
-  fn non_text_inscription_not_cached() {
-    // Test that non-text inscriptions (e.g., images) don't get cached even if they contain JSON
+  fn non_text_inscription_cached_as_na() {
+    // Test that non-text inscriptions (e.g., images) get cached as 'NA' even if they contain JSON
     let json_in_image = r#"{"p":"brc-20","op":"deploy","tick":"TEST"}"#;
     let image_inscription = inscription("image/png", json_in_image);
     let template = TransactionTemplate {
@@ -5859,12 +5877,19 @@ mod tests {
     let inscription_id = InscriptionId { txid, index: 0 };
     context.mine_blocks(1);
 
-    // Verify metaprotocol is not cached (not text-related)
+    // Verify metaprotocol is cached as 'NA' (not text-related)
     let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
-    assert_eq!(metaprotocol, None);
+    assert_eq!(metaprotocol, None); // 'NA' is returned as None
 
     // Verify is_brc20 returns false
     assert!(!context.index.is_brc20(inscription_id).unwrap());
+
+    // Verify the cache entry exists
+    let rtx = context.index.database.begin_read().unwrap();
+    let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL).unwrap();
+    let cached_value = metaprotocol_table.get(&inscription_id.store()).unwrap();
+    assert!(cached_value.is_some());
+    assert_eq!(cached_value.unwrap().value(), b"NA");
   }
 
   #[test]
@@ -5891,6 +5916,49 @@ mod tests {
     if metaprotocol.is_some() {
       assert_eq!(metaprotocol, Some("brc-721".to_string()));
       assert!(!context.index.is_brc20(inscription_id).unwrap()); // Not brc-20
+    } else {
+      // If it doesn't parse, it should be cached as 'NA'
+      let rtx = context.index.database.begin_read().unwrap();
+      let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL).unwrap();
+      let cached_value = metaprotocol_table.get(&inscription_id.store()).unwrap();
+      assert!(cached_value.is_some());
+      assert_eq!(cached_value.unwrap().value(), b"NA");
     }
+  }
+
+  #[test]
+  fn brc20_cache_filled_on_transfer() {
+    // Test that BRC20 cache is filled when transfer happens for existing inscriptions
+    let brc20_json = r#"{"p":"brc-20","op":"transfer","tick":"TEST","amt":"100"}"#;
+    let brc20_inscription = inscription("text/plain;charset=utf-8", brc20_json);
+    let create_template = TransactionTemplate {
+      inputs: &[(1, 0, 0, brc20_inscription.to_witness())],
+      ..Default::default()
+    };
+
+    let context = Context::builder().build();
+    context.mine_blocks(1);
+    let create_txid = context.rpc_server.broadcast_tx(create_template);
+    let inscription_id = InscriptionId {
+      txid: create_txid,
+      index: 0,
+    };
+    context.mine_blocks(1);
+
+    // Initially, metaprotocol should be cached (from creation)
+    let metaprotocol = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol, Some("brc-20".to_string()));
+
+    // Transfer the inscription
+    context.rpc_server.broadcast_tx(TransactionTemplate {
+      inputs: &[(2, 1, 0, Default::default())],
+      ..Default::default()
+    });
+    context.mine_blocks(1);
+
+    // After transfer, metaprotocol should still be cached
+    let metaprotocol_after_transfer = context.index.get_metaprotocol(inscription_id).unwrap();
+    assert_eq!(metaprotocol_after_transfer, Some("brc-20".to_string()));
+    assert!(context.index.is_brc20(inscription_id).unwrap());
   }
 }
