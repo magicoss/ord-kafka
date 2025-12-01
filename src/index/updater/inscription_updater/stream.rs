@@ -367,26 +367,14 @@ impl StreamEvent {
     self
   }
 
-  pub fn publish(&mut self, index: Option<&Index>) -> Result {
+  pub fn publish(&mut self, is_brc20: bool) -> Result {
     if env::var("KAFKA_TOPIC").is_err() {
       return Ok(());
     }
 
-    // DO NOT send brc20 transfer events - check cache flag for fast filtering
-    if self.old_owner.is_some() {
-      if let Some(index) = index {
-        if index.is_brc20(self.inscription_id).unwrap_or(false) {
-          return Ok(());
-        }
-      } else if self
-        .brc20
-        .as_ref()
-        .map(|brc| brc.p == "brc-20")
-        .unwrap_or(false)
-      {
-        // Fallback to parsing if index not available
-        return Ok(());
-      }
+    // DO NOT send brc20 transfer events
+    if self.old_location.is_some() && is_brc20 {
+      return Ok(());
     }
 
     let key = self.key();

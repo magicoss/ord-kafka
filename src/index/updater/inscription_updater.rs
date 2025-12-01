@@ -425,43 +425,71 @@ impl InscriptionUpdater<'_, '_, '_> {
     let (unbound, sequence_number) = match flotsam.origin {
       Origin::Old { old_satpoint } => {
         // Check if metaprotocol is cached, if not, parse and cache it
-        let metaprotocol_cached = self
-          .inscription_id_to_metaprotocol
-          .get(&inscription_id.store())?
-          .is_some();
+        let is_brc20 = {
+          // First, check and extract the cached value (if exists)
+          let cached_value = self
+            .inscription_id_to_metaprotocol
+            .get(&inscription_id.store())?
+            .map(|guard| {
+              std::str::from_utf8(guard.value())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+            });
 
-        if !metaprotocol_cached {
-          // Cache metaprotocol for existing inscriptions during transfer
-          if let Ok(Some(inscription)) = index.get_inscription_by_id(inscription_id) {
-            if let Some(body) = inscription.body() {
-              use crate::index::updater::inscription_updater::stream::StreamEvent;
-              let content_type = inscription.content_type().map(|ct| ct.to_string());
-              if StreamEvent::is_text_related(inscription.media(), content_type) {
-                if let Ok(brc20) = serde_json::from_slice::<stream::BRC20>(body) {
-                  // Store the protocol string (e.g., "brc-20")
-                  self
-                    .inscription_id_to_metaprotocol
-                    .insert(&inscription_id.store(), brc20.p.as_bytes())?;
+          // Now guard is dropped, we can use mutable borrow
+          if let Some(metaprotocol) = cached_value {
+            // Use cached value directly
+            metaprotocol == "brc-20"
+          } else {
+            // Cache metaprotocol for existing inscriptions during transfer
+            let mut is_brc20_result = false;
+            if let Ok(Some(inscription)) = index.get_inscription_by_id(inscription_id) {
+              if let Some(body) = inscription.body() {
+                use crate::index::updater::inscription_updater::stream::StreamEvent;
+                let content_type = inscription.content_type().map(|ct| ct.to_string());
+                if StreamEvent::is_text_related(inscription.media(), content_type) {
+                  if let Ok(brc20) = serde_json::from_slice::<stream::BRC20>(body) {
+                    // Store the protocol string (e.g., "brc-20")
+                    self
+                      .inscription_id_to_metaprotocol
+                      .insert(&inscription_id.store(), brc20.p.as_bytes())?;
+                    is_brc20_result = brc20.p == "brc-20";
+                    log::info!(
+                      "Caching metaprotocol for inscription: {} with value: {}",
+                      inscription_id,
+                      brc20.p
+                    );
+                  } else {
+                    // Not a valid BRC20, store 'NA' to indicate we've checked
+                    self
+                      .inscription_id_to_metaprotocol
+                      .insert(&inscription_id.store(), b"NA".as_slice())?;
+                    log::info!(
+                      "Not a valid BRC20, storing 'NA' for inscription: {}",
+                      inscription_id
+                    );
+                  }
                 } else {
-                  // Not a valid BRC20, store 'NA' to indicate we've checked
+                  // Not text-related, store 'NA' to indicate we've checked
                   self
                     .inscription_id_to_metaprotocol
                     .insert(&inscription_id.store(), b"NA".as_slice())?;
+                  log::info!(
+                    "Not text-related, storing 'NA' for inscription: {}",
+                    inscription_id
+                  );
                 }
               } else {
-                // Not text-related, store 'NA' to indicate we've checked
+                // No body, store 'NA' to indicate we've checked
                 self
                   .inscription_id_to_metaprotocol
                   .insert(&inscription_id.store(), b"NA".as_slice())?;
+                log::info!("No body, storing 'NA' for inscription: {}", inscription_id);
               }
-            } else {
-              // No body, store 'NA' to indicate we've checked
-              self
-                .inscription_id_to_metaprotocol
-                .insert(&inscription_id.store(), b"NA".as_slice())?;
             }
+            is_brc20_result
           }
-        }
+        };
 
         StreamEvent::new(
           tx,
@@ -473,7 +501,7 @@ impl InscriptionUpdater<'_, '_, '_> {
           self.block_hash,
         )
         .with_transfer(old_satpoint, index)
-        .publish(Some(index))?;
+        .publish(is_brc20)?;
 
         self
           .satpoint_to_sequence_number
@@ -648,12 +676,21 @@ impl InscriptionUpdater<'_, '_, '_> {
               self
                 .inscription_id_to_metaprotocol
                 .insert(&inscription_id.store(), brc20.p.as_bytes())?;
+              log::info!(
+                "Storing metaprotocol for inscription: {} with value: {}",
+                inscription_id,
+                brc20.p
+              );
               Some(brc20)
             } else {
               // Not a valid BRC20, store 'NA' to indicate we've checked
               self
                 .inscription_id_to_metaprotocol
                 .insert(&inscription_id.store(), b"NA".as_slice())?;
+              log::info!(
+                "Not a valid BRC20, storing 'NA' for inscription: {}",
+                inscription_id
+              );
               None
             }
           } else {
@@ -661,6 +698,10 @@ impl InscriptionUpdater<'_, '_, '_> {
             self
               .inscription_id_to_metaprotocol
               .insert(&inscription_id.store(), b"NA".as_slice())?;
+            log::info!(
+              "Not text-related, storing 'NA' for inscription: {}",
+              inscription_id
+            );
             None
           }
         } else {
@@ -668,8 +709,15 @@ impl InscriptionUpdater<'_, '_, '_> {
           self
             .inscription_id_to_metaprotocol
             .insert(&inscription_id.store(), b"NA".as_slice())?;
+          log::info!("No body, storing 'NA' for inscription: {}", inscription_id);
           None
         };
+
+        // Check if this is a BRC20 inscription
+        let is_brc20 = parsed_brc20
+          .as_ref()
+          .map(|brc20| brc20.p == "brc-20")
+          .unwrap_or(false);
 
         StreamEvent::new(
           tx,
@@ -694,7 +742,7 @@ impl InscriptionUpdater<'_, '_, '_> {
           charms,
           parsed_brc20,
         )
-        .publish(Some(index))?;
+        .publish(is_brc20)?;
 
         (unbound, sequence_number)
       }
