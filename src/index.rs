@@ -1883,7 +1883,7 @@ impl Index {
   pub(crate) fn get_metaprotocol(&self, inscription_id: InscriptionId) -> Result<Option<String>> {
     let rtx = self.database.begin_read()?;
     let metaprotocol_table = rtx.open_table(INSCRIPTION_ID_TO_METAPROTOCOL)?;
-    
+
     if let Some(guard) = metaprotocol_table.get(&inscription_id.store())? {
       if let Ok(s) = std::str::from_utf8(guard.value()) {
         return Ok(Some(s.to_string()));
@@ -1893,10 +1893,12 @@ impl Index {
   }
 
   pub(crate) fn is_brc20(&self, inscription_id: InscriptionId) -> Result<bool> {
-    Ok(self
-      .get_metaprotocol(inscription_id)?
-      .map(|p| p == "brc-20")
-      .unwrap_or(false))
+    Ok(
+      self
+        .get_metaprotocol(inscription_id)?
+        .map(|p| p == "brc-20")
+        .unwrap_or(false),
+    )
   }
 
   #[cfg(test)]
