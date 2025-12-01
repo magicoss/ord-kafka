@@ -5939,7 +5939,10 @@ mod tests {
     let context = Context::builder().build();
     context.mine_blocks(1);
     let create_txid = context.rpc_server.broadcast_tx(create_template);
-    let inscription_id = InscriptionId { txid: create_txid, index: 0 };
+    let inscription_id = InscriptionId {
+      txid: create_txid,
+      index: 0,
+    };
     context.mine_blocks(1);
 
     // Initially, metaprotocol should be cached (from creation)

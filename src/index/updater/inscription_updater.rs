@@ -429,7 +429,7 @@ impl InscriptionUpdater<'_, '_, '_> {
           .inscription_id_to_metaprotocol
           .get(&inscription_id.store())?
           .is_some();
-        
+
         if !metaprotocol_cached {
           // Cache metaprotocol for existing inscriptions during transfer
           if let Ok(Some(inscription)) = index.get_inscription_by_id(inscription_id) {
